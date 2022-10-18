@@ -1,0 +1,582 @@
+---
+title: "Supplemental data"
+output:
+  html_document:
+    df_print: default
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+<style type="text/css">
+  body{
+  font-size: 16pt;
+}
+</style>
+
+## Setup
+
+```{r}
+
+rm(list=ls())
+oldw <- getOption("warn")
+options(warn = -1)
+
+library(ggplot2)
+library(ggpubr)
+library(survival)
+library(survminer)
+library(dplyr)
+library(foreach)
+library(doParallel)
+library(tibble)
+library(readr)
+library(tranSurv)
+library(patchwork)
+library(cowplot)
+library(depend.truncation)
+library(WeightIt)
+
+
+
+set.seed(42)
+```
+
+
+
+
+
+
+
+Scenario #1: Survival time is exponentially distributed from an index date, genomic testing time is uniformly distributed from an index date. This yields null values for conditional Kendall's tau and the Cox coefficient for entry time; and unbiased survival times and biomarker effects.
+```{r, fig.show='hold', message=FALSE,  fig.keep='all'}
+# Scenario #1
+
+
+results <- read_csv('results_scenario1_vary_hr_contin.csv')
+
+results <- results %>% mutate(true_is_sig = ifelse(true_biomarker_p_observedsize < 0.05, 'Yes', 'No')) %>% mutate(observed_is_sig = ifelse(observed_biomarker_p < 0.05, 'Yes', 'No')) %>% mutate(true_biomarker_hr=exp(true_biomarker_coef)) %>% mutate(observed_biomarker_hr=exp(observed_biomarker_coef)) %>% mutate(`Inference result` = case_when(
+  is.na(observed_biomarker_coef) ~ 'Biomarker inference failed',
+  true_biomarker_coef <= 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ 'No association exists, falsely detected',
+  true_biomarker_coef <= 0 & observed_biomarker_coef <= 0 & observed_is_sig == 'Yes' ~ 'No association exists, wrong association detected',
+  true_biomarker_coef <= 0 & observed_is_sig == 'No' ~ 'No association exists, none detected',
+  true_biomarker_coef > 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ "Association exists, correctly detected",
+  true_biomarker_coef > 0 & observed_is_sig == 'No' ~ 'Association exists, missed',
+  true_biomarker_coef > 0 & observed_biomarker_coef < 0 & observed_is_sig == 'Yes' ~ "Association exists, wrong association detected"
+)) %>% mutate(observed_biomarker_minus_true = observed_biomarker_coef - true_biomarker_coef)
+
+plot_title = 'Scenario 1: Exponential survival times, testing uniform over first year'
+
+
+plot1 <- ggplot(results, aes(x=num_patients_observed, y=true_biomarker_hr, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2')  + ylim(0,5) + xlab("Patients observed (N)") +ylab("True biomarker HR")
+
+plot2 <- ggplot(results, aes(x=observed_biomarker_hr, y=true_biomarker_hr, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + ylim(0,5) + xlim(0,5) + xlab("Observed biomarker HR") + ylab("True biomarker HR")
+
+# final sim for survival curves
+hazard_rate = runif(1, min=0.005, max=0.03)
+
+num_patients_per_cohort = as.integer(runif(1, min=50, max=5000))
+
+
+biomarker_rate_ratio = runif(1, min=0.1, max=3)
+biomarker_statuses = rbinom(num_patients_per_cohort, 1, 0.5)
+
+
+
+final_rates = hazard_rate + hazard_rate*biomarker_statuses*biomarker_rate_ratio
+
+
+surv_times = rexp(num_patients_per_cohort, rate=final_rates)
+
+testing_times = runif(num_patients_per_cohort, 0, 12)
+testing_times = pmax(0, testing_times)
+
+censoring_times = runif(num_patients_per_cohort, 0, 120)
+
+died = ifelse(surv_times < censoring_times, 1, 0)
+surv_times = pmin(surv_times, censoring_times)
+
+
+
+
+observed_surv_times = surv_times[surv_times > testing_times]
+observed_died = died[surv_times > testing_times]
+observed_testing_times = testing_times[surv_times > testing_times]
+observed_biomarker_statuses = biomarker_statuses[surv_times > testing_times]
+
+
+
+true_fit <- survfit(Surv(surv_times, died)~biomarker_statuses, data=bind_cols(surv_times, biomarker_statuses))
+ggsurvplot(true_fit, title = "Scenario 1: True exponential survival times, testing\nuniform over first year (single random cohort)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+
+left_trunc_fit <- survfit(Surv(observed_testing_times, observed_surv_times, observed_died)~observed_biomarker_statuses, data=bind_cols(observed_testing_times, observed_surv_times, observed_biomarker_statuses))
+ggsurvplot(left_trunc_fit, title = "Scenario 1: Observed exponential survival times, testing\nuniform over first year\n(single random cohort: Risk set adjustment)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+
+plot3 <- gghistogram(results, x='kendalls', xlab="Conditional Kendall's tau", color='blue', fill='lightblue', xlim=c(-0.15,0.15))
+
+plot4 <- gghistogram(results, x='cox_coefs', xlab='Cox coefficient for time',color='blue', fill='lightblue', xlim=c(-0.15,0.15))
+
+plot5 <- gghistogram(results, x='observed_minus_true', xlab='Observed minus true median survival',color='blue', fill='lightblue', xlim=c(-5,5), bins=500)
+
+plot6 <- gghistogram(results, x='observed_biomarker_minus_true', xlab='Observed minus true log\nHR for biomarker',color='blue', fill='lightblue', xlim=c(-1,1), bins=1000) + theme(axis.title.x = element_text(size=11))
+
+print('inference results')
+print(table(results$`Inference result`))
+print(table(results$`Inference result`)/nrow(results))
+
+
+print('median true median survival')
+print(median(results$os_true_median, na.rm=TRUE))
+
+print('median Tc')
+print(median(results$kendalls, na.rm=TRUE))
+
+print('median cox coef for time')
+print(median(results$cox_coefs, na.rm=TRUE))
+
+print('median observed minus true median survival, risk set adjustment')
+print(median(results$observed_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment')
+print(median(results$observed_biomarker_minus_true, na.rm=TRUE))
+
+
+results <- results %>% mutate(observed_biomarker_coef_withtime_minus_true = observed_biomarker_coef_withtime - true_biomarker_coef)
+plot7 <- gghistogram(results, x='observed_biomarker_coef_withtime_minus_true', xlab='Observed minus true log HR for biomarker\nwith adjustment for entry time',color='blue', fill='lightblue', xlim=c(-1,1), bins=1000)
+
+print('median observed minus true biomarker, risk set adjustment with entry time adjustment')
+print(median(results$observed_biomarker_coef_withtime_minus_true, na.rm=TRUE))
+
+panel_plot <- plot_grid(plot1 + theme(legend.position='none'), plot2 + theme(legend.position='none'), get_legend(plot1), plot3, plot4, plot5, plot6, plot7, labels=c('A','B','','C', 'D', 'E','F', 'G'), nrow=3, ncol=3)
+
+ggsave2('figure1.pdf', plot=panel_plot,width=10.5, height=8.5)
+
+```
+
+
+
+
+
+Scenario #2: Survival times are exponentially distributed from an index date. Genomic testing times are normally distributed around survival times (so genomic testing sometimes occurs before death, and sometimes it does not). This yields consistently positive conditional Kendall's tau statistics; consistently negative Cox coefficients for time to testing; underestimates of survival time; and biased biomarker effects.1
+```{r, fig.show='hold', message=FALSE,  fig.keep='all'}
+
+results <- read_csv('results_scenario2_vary_hr_contin.csv')
+
+results <- results %>% mutate(true_is_sig = ifelse(true_biomarker_p_observedsize < 0.05, 'Yes', 'No')) %>% mutate(observed_is_sig = ifelse(observed_biomarker_p < 0.05, 'Yes', 'No')) %>% mutate(true_biomarker_hr=exp(true_biomarker_coef)) %>% mutate(observed_biomarker_hr=exp(observed_biomarker_coef)) %>% mutate(`Inference result` = case_when(
+  is.na(observed_biomarker_coef) ~ 'Biomarker inference failed',
+  true_biomarker_coef <= 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ 'No association exists, falsely detected',
+  true_biomarker_coef <= 0 & observed_biomarker_coef <= 0 & observed_is_sig == 'Yes' ~ 'No association exists, wrong association detected',
+  true_biomarker_coef <= 0 & observed_is_sig == 'No' ~ 'No association exists, none detected',
+  true_biomarker_coef > 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ "Association exists, correctly detected",
+  true_biomarker_coef > 0 & observed_is_sig == 'No' ~ 'Association exists, missed',
+  true_biomarker_coef > 0 & observed_biomarker_coef < 0 & observed_is_sig == 'Yes' ~ "Association exists, wrong association detected"
+)) %>% mutate(observed_biomarker_minus_true = observed_biomarker_coef - true_biomarker_coef) %>% mutate(observed_transfit_biomarker_minus_true = transfit_biomarker_coef - true_biomarker_coef)
+
+
+
+
+
+plot_title = 'Scenario 2: Exponential survival times, testing normally\ndistributed around survival times'
+
+plot1 <- ggplot(results, aes(x=num_patients_observed, y=true_biomarker_hr, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + ylim(0,5) + xlab("Patients observed (N)") +ylab("True biomarker HR")
+
+plot2 <- ggplot(results, aes(x=observed_biomarker_hr, y=true_biomarker_hr, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + ylim(0,5) + xlim(0,5) + xlab("Observed biomarker HR") + ylab("True biomarker HR")
+
+# last sim for surv curves
+hazard_rate = runif(1, min=0.005, max=0.03)
+std_dev = runif(1, min=1, max=10)
+
+num_patients_per_cohort = as.integer(runif(1, min=50, max=5000))
+
+
+biomarker_rate_ratio = runif(1, min=0.1, max=3)
+biomarker_statuses = rbinom(num_patients_per_cohort, 1, 0.5)
+
+
+
+final_rates = hazard_rate + hazard_rate*biomarker_statuses*biomarker_rate_ratio
+
+
+surv_times = rexp(num_patients_per_cohort, rate=final_rates)
+testing_times = rnorm(num_patients_per_cohort, surv_times, sd=std_dev)
+testing_times = pmax(0, testing_times)
+
+censoring_times = runif(num_patients_per_cohort, 0, 120)
+
+died = ifelse(surv_times < censoring_times, 1, 0)
+surv_times = pmin(surv_times, censoring_times)
+
+
+
+
+observed_surv_times = surv_times[surv_times > testing_times]
+observed_died = died[surv_times > testing_times]
+observed_testing_times = testing_times[surv_times > testing_times]
+observed_biomarker_statuses = biomarker_statuses[surv_times > testing_times]
+
+
+
+true_fit <- survfit(Surv(surv_times, died)~biomarker_statuses, data=bind_cols(surv_times, biomarker_statuses))
+ggsurvplot(true_fit, title = "Scenario 2: True exponential survival times, testing\nnormally distributed around survival times\n(single random cohort)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+#naive fit
+#true_fit <- survfit(Surv(survival_times, event_indicator) ~ biomarker, data=dataset)
+
+
+left_trunc_fit <- survfit(Surv(observed_testing_times, observed_surv_times, observed_died)~observed_biomarker_statuses, data=bind_cols(observed_testing_times, observed_surv_times, observed_biomarker_statuses))
+ggsurvplot(left_trunc_fit, title = "Scenario 2: Observed exponential survival times, testing\nnormally distributed around survival times\n(single random cohort: Risk set adjustment)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+plot3 <- gghistogram(results, x='kendalls', xlab="Conditional Kendall's tau", color='blue', fill='lightblue', xlim=c(-0.15,0.5), bins = 60)
+
+
+plot4 <- gghistogram(results, x='cox_coefs', xlab='Cox coefficient for time', color='blue', fill='lightblue', xlim=c(-2, 0.3), bins=20000)
+
+plot5 <- gghistogram(results, x='observed_minus_true', xlab='Observed minus true median survival', color='blue', fill='lightblue')
+
+plot6 <- gghistogram(results, x='observed_biomarker_minus_true', xlab='Observed minus true log\nHR for biomarker',color='blue', fill='lightblue', xlim=c(-2,1), bins=1000) + theme(axis.title.x = element_text(size=11))
+
+
+plot7 <- gghistogram(results, x='transfit_minus_true', xlab='Observed minus true median survival,\ntransformation modeling',color='blue', fill='lightblue', xlim=c(-125,10))
+
+
+plot8 <- gghistogram(results, x='copulafit_minus_true', xlab='Observed minus true median survival,\ncopula modeling',color='blue', fill='lightblue')
+
+
+
+results <- results %>% mutate(observed_biomarker_coef_withtime_minus_true = observed_biomarker_coef_withtime - true_biomarker_coef)
+plot9 <- gghistogram(results, x='observed_biomarker_coef_withtime_minus_true', xlab='Observed minus true log HR for biomarker\nwith adjustment for entry time',color='blue', fill='lightblue', xlim=c(-3,3), bins=10000)
+
+
+
+print('inference results')
+print(table(results$`Inference result`))
+print(table(results$`Inference result`)/nrow(results))
+
+print('median true median survival')
+print(median(results$os_true_median, na.rm=TRUE))
+
+
+print('median Tc')
+print(median(results$kendalls, na.rm=TRUE))
+
+print('median cox coef for time')
+print(median(results$cox_coefs, na.rm=TRUE))
+
+print('median observed minus true median survival, risk set adjustment')
+print(median(results$observed_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, linear')
+print(median(results$transfit_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, exponential')
+print(median(results$transfitexp_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, copula modeling')
+print(median(results$copulafit_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment')
+print(median(results$observed_biomarker_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment with entry time adjustment')
+print(median(results$observed_biomarker_coef_withtime_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, transformation modeling')
+print(median(results$observed_transfit_biomarker_minus_true, na.rm=TRUE))
+
+
+panel_plot <- plot_grid(plot1 + theme(legend.position='none'), plot2 + theme(legend.position='none'), get_legend(plot1), plot3, plot4, plot5, plot6, plot7, plot8, plot9, labels=c('A','B','','C', 'D', 'E','F','G','H','I','J','K'), nrow=4, ncol=3)
+
+ggsave2('figure2.pdf', plot=panel_plot,width=10.5, height=8.5)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+Scenario #3: Survival times are exponentially distributed from an index date. However, each cohort contains two subgroups. In the first subgroup, genomic testing times are uniformly distributed over the first three months following the index date. In the second subgroup, genomic testing times are normally distributed around survival times (as was done for scenario #1). In the resulting heterogeneous cohorts, conditional Kendall's tau statistics are consistently negative; Cox coefficients for time are consistently positive; survival times are underestimated; and observed biomarker effects are biased.
+
+```{r, fig.show='hold', message=FALSE,  fig.keep='all'}
+# Scenario #3
+
+results <- read_csv('results_scenario3_vary_hr_contin.csv')
+
+results <- results %>% mutate(true_is_sig = ifelse(true_biomarker_p_observedsize < 0.05, 'Yes', 'No')) %>% mutate(observed_is_sig = ifelse(observed_biomarker_p < 0.05, 'Yes', 'No')) %>% mutate(`Inference result` = case_when(
+  is.na(observed_biomarker_coef) ~ 'Biomarker inference failed',
+  true_biomarker_coef <= 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ 'No association exists, falsely detected',
+  true_biomarker_coef <= 0 & observed_biomarker_coef <= 0 & observed_is_sig == 'Yes' ~ 'No association exists, wrong association detected',
+  true_biomarker_coef <= 0 & observed_is_sig == 'No' ~ 'No association exists, none detected',
+  true_biomarker_coef > 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ "Association exists, correctly detected",
+  true_biomarker_coef > 0 & observed_is_sig == 'No' ~ 'Association exists, missed',
+  true_biomarker_coef > 0 & observed_biomarker_coef < 0 & observed_is_sig == 'Yes' ~ "Association exists, wrong association detected"
+)) %>% mutate(observed_biomarker_minus_true = observed_biomarker_coef - true_biomarker_coef) %>% mutate(observed_transfit_biomarker_minus_true = transfit_biomarker_coef - true_biomarker_coef)
+
+plot_title = "Scenario #3: Exponential survival times. 'Early' subgroup has genomic\ntesting uniformly over the first three months; 'late' subgroup has testing\nnormally distributed around survival times."
+
+plot1 <- ggplot(results, aes(x=num_patients_observed, y=true_biomarker_coef, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + ylim(-2,2.5) + xlab("Patients observed (N)") +ylab("True biomarker HR")
+
+plot2 <- ggplot(results, aes(x=observed_biomarker_coef, y=true_biomarker_coef, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + xlim(-2,2.5) + ylim(-2.5,2.5) + xlab("Observed biomarker HR") + ylab("True biomarker HR")
+
+# last sim for surv curves
+hazard_rate = runif(1, 0.005, 0.03)
+proportion_early = runif(1, 0.05, 0.95)
+std_dev = runif(1, 1, 10)
+
+num_patients_per_cohort = as.integer(runif(1, min=50, max=5000))
+
+
+biomarker_rate_ratio = runif(1, min=0.1, max=3)
+biomarker_statuses = rbinom(num_patients_per_cohort, 1, 0.5)
+final_surv_rates = hazard_rate + hazard_rate*biomarker_statuses*biomarker_rate_ratio
+
+num_early_patients = as.integer(num_patients_per_cohort*proportion_early)
+num_late_patients = num_patients_per_cohort - num_early_patients
+
+early_cohort_testing_times = runif(num_early_patients, min=0, max=3)
+early_cohort_survival_times = rexp(num_early_patients, final_surv_rates[1:num_early_patients])
+
+
+late_cohort_survival_times = rexp(num_late_patients, final_surv_rates[num_early_patients+1:num_patients_per_cohort])
+late_cohort_testing_times = rnorm(num_late_patients, late_cohort_survival_times, std_dev)
+
+surv_times = c(early_cohort_survival_times, late_cohort_survival_times)
+testing_times = c(early_cohort_testing_times, late_cohort_testing_times)
+testing_times = pmax(0, testing_times)
+
+censoring_times = runif(num_patients_per_cohort, 0, 120)
+
+died = ifelse(surv_times < censoring_times, 1, 0)
+surv_times = pmin(surv_times, censoring_times)
+
+observed_surv_times = surv_times[surv_times > testing_times]
+observed_died = died[surv_times > testing_times]
+observed_testing_times = testing_times[surv_times > testing_times]
+observed_biomarker_statuses = biomarker_statuses[surv_times > testing_times]
+
+
+true_fit <- survfit(Surv(surv_times, died)~biomarker_statuses, data=bind_cols(surv_times, biomarker_statuses))
+ggsurvplot(true_fit, title = "Scenario #3: True exponential survival times. 'Early' subgroup\nhas genomic testing uniformly over the first three months; 'late'\nsubgroup has testing normally distributed around survival times.\n(single random cohort)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+
+left_trunc_fit <- survfit(Surv(observed_testing_times, observed_surv_times, observed_died)~observed_biomarker_statuses, data=bind_cols(observed_testing_times, observed_surv_times, observed_biomarker_statuses))
+ggsurvplot(left_trunc_fit, title = "Scenario #3: Observed exponential survival times. 'Early'\nsubgroup has genomic testing uniformly over the first three\nmonths; 'late' subgroup has testing normally distributed\naround survival times.\n(single random cohort: Risk set adjustment)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+
+plot3 <- ggplot(results, aes(x=proportion_early, y=kendalls, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + xlim(0,0.1) + xlab('Proportion genotyped early/independently') + ylab("Conditional Kendall's tau")
+
+
+plot4 <- gghistogram(results, x='kendalls', xlab="Conditional Kendall's tau", color='blue', fill='lightblue')
+
+
+plot5 <- gghistogram(results, x='cox_coefs', xlab='Cox coefficient for time', color='blue', fill='lightblue', xlim=c(-0.25, 0.25), bins=100)
+
+plot6 <- gghistogram(results, x='observed_minus_true', xlab='Observed minus true median survival', color='blue', fill='lightblue')
+
+plot7 <- gghistogram(results, x='observed_biomarker_minus_true', xlab='Observed minus true log\nHR for biomarker', color='blue', fill='lightblue', xlim=c(-1,1), bins=1000) + theme(axis.title.x = element_text(size=11))
+
+
+
+plot8 <- gghistogram(results, x='transfit_minus_true', xlab='Observed minus true median survival,\ntransformation modeling', color='blue', fill='lightblue')
+
+
+plot9 <- gghistogram(results, x='copulafit_minus_true', xlab='Observed minus true median survival,\ncopula modeling', color='blue', fill='lightblue')
+
+results <- results %>% mutate(observed_biomarker_coef_withtime_minus_true = observed_biomarker_coef_withtime - true_biomarker_coef)
+plot10 <- gghistogram(results, x='observed_biomarker_coef_withtime_minus_true', xlab='Observed minus true log HR for biomarker\nwith adjustment for entry time',color='blue', fill='lightblue', xlim=c(-1,1), bins=1000)
+
+
+
+
+
+print('inference results')
+print(table(results$`Inference result`))
+print(table(results$`Inference result`)/nrow(results))
+
+print('median true median survival')
+print(median(results$os_true_median, na.rm=TRUE))
+
+
+print('median Tc')
+print(median(results$kendalls, na.rm=TRUE))
+
+print('median cox coef for time')
+print(median(results$cox_coefs, na.rm=TRUE))
+
+print('median observed minus true median survival, risk set adjustment')
+print(median(results$observed_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, linear')
+print(median(results$transfit_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, exponential')
+print(median(results$transfitexp_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, copula modeling')
+print(median(results$copulafit_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment')
+print(median(results$observed_biomarker_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment with entry time adjustment')
+print(median(results$observed_biomarker_coef_withtime_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, transformation modeling')
+print(median(results$observed_transfit_biomarker_minus_true, na.rm=TRUE))
+
+
+panel_plot <- plot_grid(plot1 + theme(legend.position='none'), plot2 + theme(legend.position='none'), get_legend(plot1), plot3 + theme(legend.position='none'), plot4, plot5, plot6, plot7, plot8, plot9, plot10, labels=c('A','B','','C', 'D', 'E','F','G','H','I','J'), nrow=4, ncol=3)
+
+ggsave2('figure3.pdf', plot=panel_plot,width=10.5, height=9)
+
+
+
+```
+
+
+
+
+
+Scenario 4: A latent exponentially distributed time to cancer progression is simulated. Next, times from progression to mortality and from progression to genomic testing are calculated, with each following its own exponential distribution indexed at progression. This yield basically any values for the conditional Kendall's tau statistic and Cox coefficient for time, including null values, depending on the relationship between progression hazard and mortality hazard. This always yields underestimates of survival time. It also yields observed Cox biomarker coefficients that are different from the "true" values calculated for this cohort, though interestingly the observed Cox biomarker coefficients for Scenario 3 correspond to the true values obtained in other scenarios.
+
+```{r, fig.show='hold', message=FALSE,  fig.keep='all'}
+# Scenario #4
+
+
+results <- read_csv('results_scenario4_vary_hr_contin.csv')
+
+results <- results %>% mutate(true_is_sig = ifelse(true_biomarker_p_observedsize < 0.05, 'Yes', 'No')) %>% mutate(observed_is_sig = ifelse(observed_biomarker_p < 0.05, 'Yes', 'No')) %>% mutate(`Inference result` = case_when(
+  is.na(observed_biomarker_coef) ~ 'Biomarker inference failed',
+  true_biomarker_coef <= 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ 'No association exists, falsely detected',
+  true_biomarker_coef <= 0 & observed_biomarker_coef <= 0 & observed_is_sig == 'Yes' ~ 'No association exists, wrong association detected',
+  true_biomarker_coef <= 0 & observed_is_sig == 'No' ~ 'No association exists, none detected',
+  true_biomarker_coef > 0 & observed_biomarker_coef > 0 & observed_is_sig == 'Yes' ~ "Association exists, correctly detected",
+  true_biomarker_coef > 0 & observed_is_sig == 'No' ~ 'Association exists, missed',
+  true_biomarker_coef > 0 & observed_biomarker_coef < 0 & observed_is_sig == 'Yes' ~ "Association exists, wrong association detected"
+)) %>% mutate(observed_biomarker_minus_true = observed_biomarker_coef - true_biomarker_coef) %>% mutate(observed_transfit_biomarker_minus_true = transfit_biomarker_coef - true_biomarker_coef)
+
+plot_title = "Scenario 4: Exponentially distributed survival and testing times are\nindexed at a latent, exponentially distributed time to progression."
+
+plot1 <- ggplot(results, aes(x=num_patients_observed, y=true_biomarker_coef, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + ylim(-2,5) + xlab("Patients observed (N)") +ylab("True biomarker HR")
+
+plot2 <- ggplot(results, aes(x=observed_biomarker_coef, y=true_biomarker_coef, color=`Inference result`)) + geom_point() + scale_color_brewer(palette='Dark2') + xlim(-5,5) + ylim(-5,5) + xlab("Observed biomarker HR") + ylab("True biomarker HR")
+
+
+
+# final sim for surv curves
+
+num_patients_per_cohort = as.integer(runif(1, min=50, max=5000))
+
+
+biomarker_rate_ratio = runif(1, min=0.1, max=3)
+biomarker_statuses = rbinom(num_patients_per_cohort, 1, 0.5)
+
+
+progression_rate = runif(1, min=0.005, max=0.03)
+testing_rate = runif(1, min=0.005, max=0.03)
+testing_times = pmax(0, testing_times)
+hazard_rate = runif(1, min=0.005, max=0.03)
+
+
+
+final_progression_rates = progression_rate + progression_rate*biomarker_statuses*biomarker_rate_ratio
+final_surv_rates = hazard_rate + hazard_rate*biomarker_statuses*biomarker_rate_ratio
+
+
+
+progression_times = rexp(num_patients_per_cohort, rate=final_progression_rates)
+testing_times = progression_times + rexp(num_patients_per_cohort, rate = testing_rate)
+surv_times = progression_times + rexp(num_patients_per_cohort, final_surv_rates)
+
+censoring_times = runif(num_patients_per_cohort, 0, 120)
+
+
+
+died = ifelse(surv_times < censoring_times, 1, 0)
+surv_times = pmin(surv_times, censoring_times)
+
+observed_surv_times = surv_times[surv_times > testing_times]
+observed_died = died[surv_times > testing_times]
+observed_testing_times = testing_times[surv_times > testing_times]
+observed_biomarker_statuses = biomarker_statuses[surv_times > testing_times]
+
+
+true_fit <- survfit(Surv(surv_times, died)~biomarker_statuses, data=bind_cols(surv_times, biomarker_statuses))
+ggsurvplot(true_fit, title = "Scenario 4: True exponentially distributed survival and testing\ntimes are indexed at a latent, exponentially distributed time to\nprogression (single random cohort)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+
+left_trunc_fit <- survfit(Surv(observed_testing_times, observed_surv_times, observed_died)~observed_biomarker_statuses, data=bind_cols(observed_testing_times, observed_surv_times, observed_biomarker_statuses))
+ggsurvplot(left_trunc_fit, title = "Scenario 4: Observed exponentially distributed survival and\ntesting times are indexed at a latent, exponentially distributed\ntime to\nprogression (single random cohort: Risk set adjustment)", xlim=c(0,60), break.time.by=6, xlab="Months")
+
+plot3 <- gghistogram(results, x='kendalls', xlab="Conditional Kendall's tau", color='blue', fill='lightblue')
+
+
+plot4 <- gghistogram(results, x='cox_coefs', xlab='Cox coefficient for time', color='blue', fill='lightblue', xlim=c(-0.1, 0.1), bins=100000)
+
+plot5 <- gghistogram(results, x='observed_minus_true', xlab='Observed minus true median survival', color='blue', fill='lightblue')
+
+plot6 <- gghistogram(results, x='transfit_minus_true', xlab='Observed minus true median survival,\ntransformation modeling', color='blue', fill='lightblue')
+
+
+plot7 <- gghistogram(results, x='copulafit_minus_true', xlab='Observed minus true median survival,\ncopula modeling', color='blue', fill='lightblue') 
+
+
+plot8 <- gghistogram(results, x='observed_biomarker_minus_true', xlab='Observed minus true log\nHR for biomarker', color='blue', fill='lightblue', xlim=c(-1.5,1), bins=1000) + theme(axis.title.x = element_text(size=11))
+
+results <- results %>% mutate(observed_biomarker_coef_withtime_minus_true = observed_biomarker_coef_withtime - true_biomarker_coef)
+plot9 <- gghistogram(results, x='observed_biomarker_coef_withtime_minus_true', xlab='Observed minus true log HR for biomarker\nwith adjustment for entry time',color='blue', fill='lightblue', xlim=c(-1.5,1.0), bins=10000)
+
+
+
+
+
+print('inference results')
+print(table(results$`Inference result`))
+print(table(results$`Inference result`)/nrow(results))
+
+print('median true median survival')
+print(median(results$os_true_median, na.rm=TRUE))
+
+print('median Tc')
+print(median(results$kendalls, na.rm=TRUE))
+
+print('median cox coef for time')
+print(median(results$cox_coefs, na.rm=TRUE))
+
+print('median observed minus true median survival, risk set adjustment')
+print(median(results$observed_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, linear')
+print(median(results$transfit_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, transformation modeling, exponential')
+print(median(results$transfitexp_minus_true, na.rm=TRUE))
+
+print('median observed minus true median survival, copula modeling')
+print(median(results$copulafit_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment')
+print(median(results$observed_biomarker_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, transformation modeling')
+print(median(results$observed_transfit_biomarker_minus_true, na.rm=TRUE))
+
+print('median observed minus true biomarker, risk set adjustment with entry time adjustment')
+print(median(results$observed_biomarker_coef_withtime_minus_true, na.rm=TRUE))
+
+
+panel_plot <- plot_grid(plot1 + theme(legend.position='none'), plot2 + theme(legend.position='none'), get_legend(plot1), plot3 , plot4, plot5, plot6, plot7, plot8, plot9, labels=c('A','B','','C', 'D', 'E','F','G','H','I','J'), nrow=4, ncol=3)
+
+ggsave2('figure4.pdf', plot=panel_plot,width=10.5, height=9)
+
+
+```
+
